@@ -2,38 +2,57 @@ name: CD - Deploy to EC2
 
 on:
   push:
-    branches:
-      - main
+    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout source code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup SSH
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+      - name: Trust EC2 host key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Deploy on EC2
+      - name: Copy project to EC2
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude "target" \
+            --exclude ".idea" \
+            --exclude ".vscode" \
+            ./ \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/autocash-project/
+
+      - name: Deploy on EC2 (docker compose)
         run: |
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
             set -e
             cd ~/autocash-project
 
-            echo "🔄 Pull latest code"
-            git pull origin main
+            echo "== Docker versions =="
+            docker --version
+            docker compose version
 
-            echo "🐳 Build & run containers"
-            docker compose down
-            docker compose build
-            docker compose up -d
+            echo "== Build & up =="
+            docker compose up -d --build
 
-            echo "✅ Deployment finished"
+            echo "== Status =="
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+            echo "== Smoke test =="
+            curl -fsS http://localhost:8080/hello || (echo "Smoke test failed" && exit 1)
+
+            echo "== Cleanup =="
+            docker system prune -af || true
           EOF
+
 
